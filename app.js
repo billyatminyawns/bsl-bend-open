@@ -209,7 +209,7 @@ function renderHoles() {
     row.innerHTML = `
       <div class="hole-num">${info.h}</div>
       <div class="hole-info">
-        <div><b>Par ${info.par}</b> <span class="hole-meta">· ${info.yds} yds · HCP ${info.hcp}</span></div>
+        <div><b>Par ${info.par}</b> <span class="hole-meta">· ${info.yds} yds · HCP ${info.hcp}</span> <span class="tee-badge ${info.tee === "R" ? "tee-r" : "tee-g"}">${TEE_LABEL[info.tee]}</span></div>
         ${used ? `<div class="hole-players">${esc(used)}</div>` : ""}
       </div>
       <div class="${cls}">${s ? s.s : "–"}</div>`;
@@ -240,7 +240,7 @@ function openScoreModal(h) {
     <div class="modal-back" id="mb">
       <div class="modal">
         <h3>Hole ${h} · Par ${info.par}</h3>
-        <div class="sub">${info.yds} yds · HCP ${info.hcp} · ${esc(team.name)}</div>
+        <div class="sub">${info.yds} yds from the <b>${info.tee === "R" ? "Rust ▲" : "Gold ▼"}</b> tees · HCP ${info.hcp} · ${esc(team.name)}</div>
         <div class="stepper">
           <button id="minus">−</button>
           <div><div class="val" id="strokes">${strokes}</div><div class="lbl">team strokes</div></div>

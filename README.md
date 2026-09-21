@@ -1,10 +1,11 @@
 # 🦌 11th BSL Bend Open — Pronghorn Nicklaus
 
-Live team scramble tracker for the 11th BSL Bend Open at Pronghorn Club (Nicklaus Course, Rust tees · 6,533 yds · par 72).
+Live team scramble tracker for the 11th BSL Bend Open at Pronghorn Club (Nicklaus Course, Rust/Gold Combo tees · 6,292 yds · par 72 · M 69.7/137).
 
 **Live app:** https://billyatminyawns.github.io/bsl-bend-open/
 
 ## Features
+- Per-hole combo tee shown on the card (▲ Rust / ▼ Gold, from the scorecard arrows)
 - Real-time team scoring (Firebase Realtime Database) — each team logs in with its own password and can only edit its own card
 - Scramble requirement tracking per player: 2 drives (par 3s excluded), 2 second shots (par 3s count), 2 first putts (on the green)
 - Live leaderboard with full hole-by-hole cards
