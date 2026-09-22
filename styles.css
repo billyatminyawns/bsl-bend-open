@@ -213,6 +213,7 @@ main { max-width: 640px; margin: 0 auto; padding: 14px 12px 20px; }
 .hole-score.s-birdie { background: #fde8e8; border-color: var(--birdie); color: var(--birdie); }
 .hole-score.s-eagle { background: #fef3c7; border-color: var(--eagle); color: var(--eagle); }
 .hole-score.s-double { background: #e0e7ff; border-color: var(--bogey); color: var(--bogey); }
+.hole-score.s-bogey { background: #eff6ff; border-color: #2563eb; color: #2563eb; }
 
 /* ───────────── modal ───────────── */
 .modal-back {
@@ -294,7 +295,7 @@ main { max-width: 640px; margin: 0 auto; padding: 14px 12px 20px; }
 .lb-grid td.c-birdie { background: #fde8e8; color: var(--birdie); font-weight: 700; }
 .lb-grid td.c-eagle { background: #fef3c7; color: var(--eagle); font-weight: 800; }
 .lb-grid td.c-double { background: #e0e7ff; color: var(--bogey); font-weight: 700; }
-.lb-grid td.c-bogey { color: var(--bogey); }
+.lb-grid td.c-bogey { color: #2563eb; }
 
 /* ───────────── requirements ───────────── */
 .req-team-title { font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--ink-soft); margin: 16px 0 8px; }

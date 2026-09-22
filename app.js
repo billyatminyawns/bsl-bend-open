@@ -202,6 +202,7 @@ function renderHoles() {
       if (diff <= -2) cls += " s-eagle";
       else if (diff === -1) cls += " s-birdie";
       else if (diff >= 2) cls += " s-double";
+      else if (diff === 1) cls += " s-bogey";
     }
     const row = document.createElement("div");
     row.className = "hole-row";
@@ -247,8 +248,9 @@ function openScoreModal(h) {
           <button id="plus">+</button>
         </div>
         <div class="score-word" id="score-word"></div>
-        ${isPar3 ? "" : `<div class="pick-label">Whose drive did you use?</div><div class="chips" id="chips-drive"></div>`}
-        <div class="pick-label">Whose 2nd shot?${isPar3 ? " (par 3s count)" : ""}</div>
+        <div class="pick-label">${isPar3 ? "Tee shot — count as whose DRIVE…" : "Whose drive did you use?"}</div>
+        <div class="chips" id="chips-drive"></div>
+        <div class="pick-label">${isPar3 ? "…OR as whose 2ND SHOT? (one or the other, not both)" : "Whose 2nd shot?"}</div>
         <div class="chips" id="chips-second"></div>
         <div class="pick-label">Whose first putt? (only if ball was ON the green)</div>
         <div class="chips" id="chips-putt"></div>
@@ -289,15 +291,23 @@ function openScoreModal(h) {
       el.appendChild(c);
     }
   };
-  mkChips("chips-drive", "drives", () => drive, (v) => (drive = v), false);
-  mkChips("chips-second", "seconds", () => second, (v) => (second = v), false);
+  // Par 3: the tee shot satisfies EITHER a drive OR a 2nd-shot credit — never both.
+  const setDrive = (v) => { drive = v; if (isPar3 && v) { second = null; mkChips("chips-second", "seconds", () => second, setSecond, false); } };
+  const setSecond = (v) => { second = v; if (isPar3 && v) { drive = null; mkChips("chips-drive", "drives", () => drive, setDrive, false); } };
+  mkChips("chips-drive", "drives", () => drive, setDrive, false);
+  mkChips("chips-second", "seconds", () => second, setSecond, false);
   mkChips("chips-putt", "putts", () => putt, (v) => (putt = v), true);
 
   $("cancel").onclick = closeModal;
   $("mb").onclick = (e) => { if (e.target.id === "mb") closeModal(); };
   $("save").onclick = () => {
-    if (!isPar3 && !drive) return toast("Pick whose drive you used ⛳️");
-    if (!second) return toast("Pick whose 2nd shot you used");
+    if (isPar3) {
+      if (!drive && !second) return toast("Pick who the tee shot counts for — drive OR 2nd shot ⛳️");
+      if (drive && second) return toast("Par 3: the tee shot counts as a drive OR a 2nd shot, not both");
+    } else {
+      if (!drive) return toast("Pick whose drive you used ⛳️");
+      if (!second) return toast("Pick whose 2nd shot you used");
+    }
     const prev = teamScores(myTeam)[h] || null;
     const changed = !prev || prev.s !== strokes;
     const entry = { s: strokes, drive: drive || null, second, putt: putt || null, ts: changed ? Date.now() : prev.ts };
@@ -413,12 +423,24 @@ async function handleFile(e, type) {
       data = await compressImage(file, 1400, 0.72);
       thumb = await compressImage(file, 260, 0.6);
     } else {
-      if (file.size > 12 * 1024 * 1024) return toast("⚠️ Video too big (12 MB max) — keep it under ~15 seconds and try again.");
+      if (file.size > 50 * 1024 * 1024) return toast("⚠️ Video too big (50 MB max) — trim it down and try again.");
       data = await readAsDataURL(file);
       thumb = await videoThumb(data).catch(() => null);
     }
     const id = uid();
-    sync.set(`mediaData/${id}`, { data });
+    // Firebase RTDB caps a single write at 16 MB, so large media is split into
+    // chunks written separately and stitched back together on playback.
+    const CHUNK = 6 * 1024 * 1024;
+    if (data.length > CHUNK) {
+      const n = Math.ceil(data.length / CHUNK);
+      for (let i = 0; i < n; i++) {
+        toast(`Uploading… ${i + 1}/${n}`);
+        await sync.set(`mediaData/${id}/c${String(i).padStart(3, "0")}`, data.slice(i * CHUNK, (i + 1) * CHUNK));
+      }
+      await sync.set(`mediaData/${id}/n`, n);
+    } else {
+      sync.set(`mediaData/${id}`, { data });
+    }
     sync.set(`mediaMeta/${id}`, {
       team: myTeam, hole: ctx.hole, type, event: ctx.event, thumb: thumb || null, ts: Date.now(), size: file.size,
     });
@@ -502,7 +524,8 @@ async function openMediaView(id, m) {
   let data = mediaCache[id];
   if (!data) {
     const rec = await sync.get(`mediaData/${id}`);
-    data = rec && rec.data;
+    if (rec && rec.data) data = rec.data;
+    else if (rec && rec.n) data = Array.from({ length: rec.n }, (_, i) => rec[`c${String(i).padStart(3, "0")}`] || "").join("");
     if (data) mediaCache[id] = data;
   }
   const slot = $("media-slot");
@@ -520,8 +543,7 @@ function reqCounts(tid) {
   const scores = teamScores(tid);
   for (const h in scores) {
     const s = scores[h];
-    const par3 = holeInfo(+h).par === 3;
-    if (s.drive && !par3 && counts[s.drive]) counts[s.drive].drives++;
+    if (s.drive && counts[s.drive]) counts[s.drive].drives++; // par-3 tee shot may be credited here
     if (s.second && counts[s.second]) counts[s.second].seconds++;
     if (s.putt && counts[s.putt]) counts[s.putt].putts++;
   }

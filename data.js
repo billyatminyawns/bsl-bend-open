@@ -69,7 +69,7 @@ const TEAM_ORDER = ["billy", "jordan", "zach", "stephen"];
 
 // Format / requirement rules (scramble)
 const RULES = {
-  drivesRequired: 2,     // per player, par 3s do NOT count
-  secondsRequired: 2,    // per player, par 3s DO count
+  drivesRequired: 2,     // per player; a par-3 tee shot may count as a drive OR a 2nd shot (one, not both)
+  secondsRequired: 2,    // per player; par 3s count (tee shot, if not used as a drive)
   puttsRequired: 2,      // first putts per player, ball must be on the green
 };
