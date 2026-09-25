@@ -26,17 +26,22 @@ const scoreWord = (diff) => {
 };
 
 // ───────────────────────── sync adapters ─────────────────────────
-// Both expose: on(path, cb) for live data, set(path, val), push(path, val) -> id, get(path) -> Promise
+// Both expose: on(path, cb) for live data, set(path, val), push(path, val) -> id, get(path) -> Promise,
+// transact(path, fn) -> Promise<committed> (fn gets the current value; return undefined to abort), newKey()
 class FirebaseAdapter {
-  constructor(cfg) {
+  constructor(cfg, root = "") {
     firebase.initializeApp(cfg);
     this.db = firebase.database();
     this.live = true;
+    this.root = root;
   }
-  on(path, cb) { this.db.ref(path).on("value", (s) => cb(s.val())); }
-  set(path, val) { return this.db.ref(path).set(val); }
-  push(path, val) { const r = this.db.ref(path).push(); r.set(val); return r.key; }
-  async get(path) { const s = await this.db.ref(path).get(); return s.val(); }
+  _ref(path) { return this.db.ref(this.root + path); }
+  on(path, cb) { this._ref(path).on("value", (s) => cb(s.val())); }
+  set(path, val) { return this._ref(path).set(val); }
+  push(path, val) { const r = this._ref(path).push(); r.set(val); return r.key; }
+  async get(path) { const s = await this._ref(path).get(); return s.val(); }
+  async transact(path, fn) { const r = await this._ref(path).transaction(fn); return r.committed; }
+  newKey() { return this.db.ref().push().key; }
   onConnection(cb) { this.db.ref(".info/connected").on("value", (s) => cb(!!s.val())); }
 }
 
@@ -69,13 +74,17 @@ class LocalAdapter {
   set(path, val) { const db = this._read(); const [node, key] = this._at(db, path, true); node[key] = val; this._write(db); }
   push(path, val) { const id = uid(); this.set(`${path}/${id}`, val); return id; }
   async get(path) { return this._get(path); }
+  async transact(path, fn) { const next = fn(this._get(path)); if (next === undefined) return false; this.set(path, next); return true; }
+  newKey() { return uid(); }
   onConnection(cb) { cb(false); }
 }
 
 // ───────────────────────── state ─────────────────────────
 let sync;
 let myTeam = null; // team id or null (spectator)
-const state = { scores: {}, drinks: {}, mediaMeta: {}, reactions: {}, comments: {} };
+const state = { scores: {}, drinks: {}, mediaMeta: {}, reactions: {}, comments: {}, market: {} };
+// ?sandbox=<name> points the whole app at an isolated practice copy of the database.
+const SANDBOX = (location.search.match(/[?&]sandbox=([\w-]{1,40})/) || [])[1] || null;
 const DEVICE_ID = (() => {
   let d = localStorage.getItem("bslbend-device");
   if (!d) { d = uid(); localStorage.setItem("bslbend-device", d); }
@@ -91,15 +100,20 @@ function ack(id) { acked.add(id); localStorage.setItem(ACK_KEY, JSON.stringify([
 // ───────────────────────── boot ─────────────────────────
 function boot() {
   if (window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey) {
-    sync = new FirebaseAdapter(window.FIREBASE_CONFIG);
+    sync = new FirebaseAdapter(window.FIREBASE_CONFIG, SANDBOX ? `sandbox_${SANDBOX}/` : "");
   } else {
     sync = new LocalAdapter();
     $("demo-note").style.display = "block";
   }
   const dot = $("sync-dot");
   if (sync.live) {
-    sync.onConnection((ok) => { dot.className = ok ? "live" : ""; $("sync-label").textContent = ok ? "LIVE" : "offline"; dot.id = "sync-dot"; });
-    dot.classList.add("live"); $("sync-label").textContent = "LIVE";
+    const liveLabel = SANDBOX ? "SANDBOX" : "LIVE";
+    sync.onConnection((ok) => { dot.className = ok ? "live" : ""; $("sync-label").textContent = ok ? liveLabel : "offline"; dot.id = "sync-dot"; });
+    dot.classList.add("live"); $("sync-label").textContent = liveLabel;
+    if (SANDBOX) {
+      $("demo-note").innerHTML = `🧪 <b>Sandbox “${esc(SANDBOX)}”</b> — a practice copy. Scores and bets here never touch the real event.`;
+      $("demo-note").style.display = "block";
+    }
   } else { dot.classList.add("demo"); $("sync-label").textContent = "DEMO"; }
 
   sync.on("scores", (v) => { state.scores = v || {}; onData(); });
@@ -107,6 +121,7 @@ function boot() {
   sync.on("mediaMeta", (v) => { state.mediaMeta = v || {}; onData(); });
   sync.on("reactions", (v) => { state.reactions = v || {}; onData(); });
   sync.on("comments", (v) => { state.comments = v || {}; onData(); });
+  sync.on("market", (v) => { state.market = v || {}; onData(); });
 
   const sess = JSON.parse(localStorage.getItem("bslbend-session") || "null");
   if (sess) { myTeam = sess.team; showApp(); } else showLogin();
@@ -175,12 +190,14 @@ function switchTab(tab) {
 // ───────────────────────── data → render + events ─────────────────────────
 function onData() {
   if ($("app").style.display !== "none") renderAll();
+  updateQuote();
   checkNotifications();
 }
 function renderAll() {
   renderHoles();
   renderLeaderboard();
   renderReqs();
+  renderMarket();
   renderMedia();
   renderFeed();
   renderRules();
@@ -324,7 +341,7 @@ function openScoreModal(h) {
     }
   };
 }
-function closeModal() { $("modal-root").innerHTML = ""; }
+function closeModal() { $("modal-root").innerHTML = ""; tradeCtx = null; }
 
 function celebrate(kind, h) {
   if (kind === "eagle") banner("b-eagle", "🦅", `<b>EAGLE on ${h}!</b><br>EVERYONE shotguns / takes a shot. All 16. No exceptions.`);
@@ -600,6 +617,8 @@ function lbStats(tid) {
 function renderLeaderboard() {
   const el = $("lb-list");
   el.innerHTML = "";
+  const wctx = marketContext(), wst = wctx.statuses.winner;
+  const winOdds = (tid) => (wst.state === "resolved" ? "" : ` · 📈 ${fmtPct(wctx.prices.winner[TEAM_ORDER.indexOf(tid)])} to win`);
   const rows = TEAM_ORDER.map((tid) => ({ tid, ...lbStats(tid) }))
     .sort((a, b) => (a.thru === 0) - (b.thru === 0) || a.toPar - b.toPar || b.thru - a.thru);
   let pos = 0, lastKey = null;
@@ -616,7 +635,7 @@ function renderLeaderboard() {
         <div class="lb-pos">${r.thru ? pos : "–"}</div>
         <div style="flex:1">
           <div class="lb-name">${esc(t.name)}</div>
-          <div class="lb-thru">${r.thru ? `thru ${r.thru} · ${r.total} strokes` : "not started"}</div>
+          <div class="lb-thru">${r.thru ? `thru ${r.thru} · ${r.total} strokes` : "not started"}${winOdds(r.tid)}</div>
         </div>
         <div class="lb-topar ${toParCls}">${r.thru ? fmtPar(r.toPar) : ""}</div>
       </div>
@@ -690,6 +709,16 @@ function renderFeed() {
   for (const id in state.mediaMeta) {
     const m = state.mediaMeta[id];
     items.push({ fid: `m-${id}`, ts: m.ts, cls: "", html: `${m.type === "video" ? "🎥" : "📸"} <b>${esc(TEAMS[m.team]?.name)}</b> posted ${m.event !== "other" ? `${m.event} proof` : "media"}${m.hole ? ` from hole ${m.hole}` : ""}.` });
+  }
+  const mctx = marketContext();
+  for (const t of mctx.trades) {
+    if (Math.abs(t.c) < 50) continue; // small bets live in the Market tab only
+    const mk = MKT_BY_ID[t.m];
+    items.push({ fid: `t-${t.id}`, ts: t.ts, cls: "f-market", html: `📈 <b>${esc(bettorName(t.who))}</b> ${t.sh > 0 ? `put <b>${fmtB(t.c)}</b> on` : `cashed out <b>${fmtB(-t.c)}</b> of`} <b>${esc(outcomeName(mk, t.o))}</b> (${esc(mk.short)}) · odds ${fmtPct(t.pb)} → ${fmtPct(t.pa)}` });
+  }
+  for (const mk of MARKET.markets) {
+    const st = mctx.statuses[mk.id];
+    if (st.state === "resolved") items.push({ fid: `r-${mk.id}`, ts: st.ts || 0, cls: "f-market", html: `🏁 <b>${esc(mk.short)} market settled:</b> ${st.winners.map((o) => `<b>${esc(outcomeName(mk, o))}</b>`).join(" & ")}. Winning shares paid out.` });
   }
   items.sort((a, b) => b.ts - a.ts);
   el.innerHTML = items.length ? "" : `<div class="media-empty">Nothing yet. Go make some noise. 🏌️</div>`;
@@ -766,6 +795,465 @@ function feedScoreMsg(tid, h, s, d) {
   return `😬 <b>${name}</b> went +${d} on hole ${h}. Rough.`;
 }
 
+// ───────────────────────── prediction market (play money) ─────────────────────────
+// LMSR market maker: every share pays 🪙1 if its outcome wins, so prices are the crowd's
+// implied odds (they always sum to 100%). Buying pushes a price up, selling pushes it down.
+// Only the trade log is stored — prices, wallets and settlement are derived from trades +
+// posted scores, so a corrected score re-settles everything automatically.
+const MKT_BY_ID = Object.fromEntries(MARKET.markets.map((m) => [m.id, m]));
+const COIN = MARKET.symbol;
+const fmtB = (n) => `${COIN}${Math.round(n).toLocaleString()}`;
+const signed = (n) => `${n >= 0 ? "+" : "−"}${fmtB(Math.abs(n))}`;
+const fmtPct = (p) => (p < 0.005 ? "<1%" : p > 0.995 ? ">99%" : `${Math.round(p * 100)}%`);
+const fmtCents = (p) => `${Math.min(99, Math.max(1, Math.round(p * 100)))}¢`;
+const fmtSh = (n) => (n >= 100 ? Math.round(n).toLocaleString() : n.toFixed(1));
+
+function lmsrPrices(q, b) {
+  const x = q.map((v) => v / b), mx = Math.max(...x);
+  const e = x.map((v) => Math.exp(v - mx)), z = e.reduce((s, v) => s + v, 0);
+  return e.map((v) => v / z);
+}
+function lmsrCost(q, b) {
+  const x = q.map((v) => v / b), mx = Math.max(...x);
+  return b * (mx + Math.log(x.reduce((s, v) => s + Math.exp(v - mx), 0)));
+}
+// closed form of C(q + Δ·eᵢ) − C(q) = spend
+const lmsrSharesFor = (q, b, i, spend) => b * Math.log1p(Math.expm1(spend / b) / lmsrPrices(q, b)[i]);
+function lmsrProceeds(q, b, i, shares) { const q2 = q.slice(); q2[i] -= shares; return lmsrCost(q, b) - lmsrCost(q2, b); }
+function lmsrAfter(q, b, i, dShares) { const q2 = q.slice(); q2[i] += dShares; return lmsrPrices(q2, b)[i]; }
+
+const mktOutcomes = (mk) => (mk.type === "eagle" ? ["yes", "no"] : TEAM_ORDER);
+const outcomeName = (mk, o) => (mk.type === "eagle" ? (o === "yes" ? "Yes" : "No") : TEAMS[o]?.name || o);
+const outcomeShort = (mk, o) => outcomeName(mk, o).replace(/^Team /, "");
+const outcomeColor = (mk, o) => (mk.type === "eagle" ? (o === "yes" ? "#15803d" : "#b91c1c") : TEAMS[o]?.color || "#999");
+const winsPhrase = (mk, o) => (mk.type === "eagle" ? (o === "yes" ? "if anyone eagles" : "if nobody eagles") : `if ${outcomeShort(mk, o)} wins`);
+
+const bettorId = (tid, name) => `${tid}|${name}`;
+const bettorName = (id) => String(id).split("|")[1] || id;
+const bettorTeam = (id) => String(id).split("|")[0];
+const allBettors = () => TEAM_ORDER.flatMap((t) => TEAMS[t].players.map((p) => bettorId(t, p)));
+let bettor = (() => { try { return JSON.parse(localStorage.getItem("bslbend-bettor") || "null"); } catch { return null; } })();
+function myBettor() {
+  return myTeam && bettor && bettor.team === myTeam && TEAMS[myTeam].players.includes(bettor.name) ? bettorId(myTeam, bettor.name) : null;
+}
+
+function tradeList(src) {
+  return Object.entries(src?.trades || {}).map(([id, t]) => ({ id, ...t }))
+    .filter((t) => MKT_BY_ID[t.m])
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0) || (a.id < b.id ? -1 : 1));
+}
+function marketQ(mk, trades) {
+  const outs = mktOutcomes(mk), q = outs.map(() => 0);
+  for (const t of trades) if (t.m === mk.id) { const i = outs.indexOf(t.o); if (i >= 0) q[i] += t.sh; }
+  return q;
+}
+
+// ── settlement (derived from posted scores) ──
+function rangeComplete(tid, [from, to]) { for (let h = from; h <= to; h++) if (!state.scores[tid]?.[h]) return false; return true; }
+function rangeTotal(tid, from, to) { let t = 0; for (let h = from; h <= to; h++) t += state.scores[tid][h].s; return t; }
+// Lowest total wins; ties go to matching cards (last 9, 6, 3, 1 holes of the range); still tied → split.
+function countbackWinners([from, to]) {
+  const len = to - from + 1;
+  let alive = TEAM_ORDER.slice();
+  for (const w of [...new Set([len, 9, 6, 3, 1])].filter((w) => w <= len)) {
+    const tot = alive.map((t) => rangeTotal(t, to - w + 1, to));
+    const best = Math.min(...tot);
+    alive = alive.filter((_, i) => tot[i] === best);
+    if (alive.length === 1) break;
+  }
+  return alive;
+}
+// open → locked (first team finished the range) → resolved (everyone finished, or an eagle for YES)
+function marketStatus(mk) {
+  const range = mk.holes;
+  if (mk.type === "eagle") {
+    let eagleTs = null;
+    for (const tid of TEAM_ORDER) for (const h in state.scores[tid] || {}) {
+      const s = state.scores[tid][h];
+      if (holeInfo(+h) && s.s - holeInfo(+h).par <= -2) eagleTs = Math.min(eagleTs ?? Infinity, s.ts || 0);
+    }
+    if (eagleTs !== null) return { state: "resolved", winners: ["yes"], ts: eagleTs };
+  }
+  if (TEAM_ORDER.every((t) => rangeComplete(t, range))) {
+    let ts = 0;
+    for (const t of TEAM_ORDER) for (let h = range[0]; h <= range[1]; h++) ts = Math.max(ts, state.scores[t][h].ts || 0);
+    return { state: "resolved", winners: mk.type === "eagle" ? ["no"] : countbackWinners(range), ts };
+  }
+  if (TEAM_ORDER.some((t) => rangeComplete(t, range))) return { state: "locked" };
+  return { state: "open" };
+}
+const payoutPerShare = (st, o) => (st.state === "resolved" && st.winners.includes(o) ? 1 / st.winners.length : 0);
+
+function marketContext(trades = tradeList(state.market)) {
+  const statuses = {}, qs = {}, prices = {};
+  for (const mk of MARKET.markets) {
+    statuses[mk.id] = marketStatus(mk);
+    qs[mk.id] = marketQ(mk, trades);
+    prices[mk.id] = lmsrPrices(qs[mk.id], mk.b);
+  }
+  return { trades, statuses, qs, prices };
+}
+// cash = bankroll − spent + sold + settled winnings. Open positions are valued at what selling them
+// right now would return (not shares × price, which would show a phantom gain right after buying);
+// in a closed market, at shares × last price.
+function walletOf(who, ctx) {
+  let cash = MARKET.bankroll;
+  const hold = {}, basis = {};
+  for (const t of ctx.trades) {
+    if (t.who !== who) continue;
+    cash -= t.c;
+    const k = `${t.m}|${t.o}`, h = hold[k] || 0;
+    if (t.sh > 0) { hold[k] = h + t.sh; basis[k] = (basis[k] || 0) + t.c; }
+    else { basis[k] = (basis[k] || 0) * (h > 0 ? Math.max(0, 1 + t.sh / h) : 0); hold[k] = h + t.sh; }
+  }
+  let value = 0;
+  const positions = [];
+  for (const k in hold) {
+    if (hold[k] < 1e-4) continue;
+    const [m, o] = k.split("|"), mk = MKT_BY_ID[m], st = ctx.statuses[m];
+    const pos = { m, o, sh: hold[k], cost: basis[k] || 0 };
+    if (st.state === "resolved") { pos.paid = pos.sh * payoutPerShare(st, o); cash += pos.paid; }
+    else {
+      const i = mktOutcomes(mk).indexOf(o);
+      pos.price = ctx.prices[m][i];
+      pos.value = st.state === "open" ? lmsrProceeds(ctx.qs[m], mk.b, i, pos.sh) : pos.sh * pos.price;
+      value += pos.value;
+    }
+    positions.push(pos);
+  }
+  return { cash, value, net: cash + value, hold, positions };
+}
+function priceHistory(mk, trades) {
+  const outs = mktOutcomes(mk), q = outs.map(() => 0);
+  const hist = [lmsrPrices(q, mk.b)], meta = [null];
+  for (const t of trades) {
+    if (t.m !== mk.id) continue;
+    const i = outs.indexOf(t.o);
+    if (i < 0) continue;
+    q[i] += t.sh;
+    hist.push(lmsrPrices(q, mk.b));
+    meta.push(t);
+  }
+  return { hist, meta };
+}
+function teamRangeLine(tid, [from, to]) {
+  let toPar = 0, thru = 0;
+  for (let h = from; h <= to; h++) { const s = state.scores[tid]?.[h]; if (s) { toPar += s.s - holeInfo(h).par; thru++; } }
+  if (!thru) return "not started";
+  return thru === to - from + 1 ? `${fmtPar(toPar)} · finished` : `${fmtPar(toPar)} thru ${thru}`;
+}
+
+// ── market tab ──
+const chartStore = {}; // marketId → { mk, hist, meta, series, outs } for the scrub layer
+let howOpen = false;
+function renderMarket() {
+  const el = $("market-list");
+  if (!el) return;
+  const ctx = marketContext(), me = myBettor();
+  el.innerHTML = walletHtml(ctx, me) + MARKET.markets.map((mk) => marketCardHtml(mk, ctx, me)).join("")
+    + standingsHtml(ctx, me) + activityHtml(ctx) + howItWorksHtml();
+  el.querySelectorAll(".mk-plot").forEach(bindScrub);
+}
+function walletHtml(ctx, me) {
+  if (!myTeam) return `<div class="demo-note">👀 You're spectating — odds update live. Log in with your team password to bet.</div>`;
+  if (!me) {
+    const t = TEAMS[myTeam];
+    return `<div class="mk-wallet">
+      <div class="mk-title">Who's betting on this phone?</div>
+      <div class="mk-fine" style="margin:4px 0 10px">Everyone on ${esc(t.name)} gets ${fmtB(MARKET.bankroll)} ${esc(MARKET.currency)} (play money). Honor system — pick yourself.</div>
+      <div class="chips">${t.players.map((p) => `<button class="chip" data-bettor="${esc(p)}">${esc(p)}</button>`).join("")}</div>
+    </div>`;
+  }
+  const w = walletOf(me, ctx), pl = w.net - MARKET.bankroll;
+  const rows = w.positions.map((p) => {
+    const mk = MKT_BY_ID[p.m], name = `<b>${esc(outcomeName(mk, p.o))}</b> <span class="sm">· ${esc(mk.short)}</span>`;
+    if (p.paid !== undefined) {
+      return `<div class="mk-pos"><div class="grow">${name}<div class="sm">${fmtSh(p.sh)} shares · ${p.paid > 0 ? `won <b class="up">${fmtB(p.paid)}</b>` : "expired worthless"}</div></div></div>`;
+    }
+    const gain = p.value - p.cost, open = ctx.statuses[p.m].state === "open";
+    return `<div class="mk-pos"><div class="grow">${name}<div class="sm">${fmtSh(p.sh)} sh @ ${fmtCents(p.cost / p.sh)} → pays <b>${fmtB(p.sh)}</b> ${esc(winsPhrase(mk, p.o))}</div>
+      <div class="sm">${open ? "cash-out now" : "est. value"} ${fmtB(p.value)} <span class="${gain >= 0.5 ? "up" : gain <= -0.5 ? "down" : ""}">${Math.abs(gain) < 0.5 ? "±0" : signed(gain)}</span></div></div>
+      ${open ? `<button class="mk-sell" data-trade="${p.m}|${p.o}|sell">Sell</button>` : `<span class="sm">🔒</span>`}</div>`;
+  }).join("");
+  return `<div class="mk-wallet">
+    <div class="mk-wallet-top"><span>Betting as <b>${esc(bettorName(me))}</b></span><button class="mk-link" data-switch-bettor>not you?</button></div>
+    <div class="mk-nums">
+      <div><div class="k">Cash</div><div class="v">${fmtB(w.cash)}</div></div>
+      <div><div class="k">In bets</div><div class="v">${fmtB(w.value)}</div></div>
+      <div><div class="k">Net worth</div><div class="v">${fmtB(w.net)}</div><small class="${pl >= 0 ? "up" : "down"}">${Math.abs(pl) < 0.5 ? "even" : signed(pl)}</small></div>
+    </div>
+    ${rows ? `<div class="mk-positions">${rows}</div>` : `<div class="mk-fine">No bets yet — tap a price below to buy in.</div>`}
+  </div>`;
+}
+function marketCardHtml(mk, ctx, me) {
+  const st = ctx.statuses[mk.id], outs = mktOutcomes(mk), prices = ctx.prices[mk.id];
+  const trades = ctx.trades.filter((t) => t.m === mk.id);
+  const vol = trades.reduce((s, t) => s + Math.abs(t.c), 0), nBettors = new Set(trades.map((t) => t.who)).size;
+  const pill = st.state === "open" ? `<span class="mk-pill live">● LIVE</span>`
+    : st.state === "locked" ? `<span class="mk-pill locked">🔒 CLOSED</span>` : `<span class="mk-pill resolved">✓ SETTLED</span>`;
+  const w = me ? walletOf(me, ctx) : null;
+  const rows = outs.map((o, i) => {
+    const held = w?.hold[`${mk.id}|${o}`] || 0;
+    const sub = [mk.type === "team" ? teamRangeLine(o, mk.holes) : "", held > 1e-4 ? `you: ${fmtSh(held)} sh` : ""].filter(Boolean).join(" · ");
+    let pct = fmtPct(prices[i]), right;
+    if (st.state === "resolved") {
+      const won = st.winners.includes(o);
+      pct = won ? `${Math.round(100 / st.winners.length)}%` : "0%";
+      right = `<div class="mk-won${won ? "" : " lost"}">${won ? (st.winners.length > 1 ? "🏆 SPLIT" : "🏆 WON") : "—"}</div>`;
+    } else {
+      const lbl = st.state === "open" ? `${mk.type === "eagle" ? outcomeName(mk, o) : "Buy"} ${fmtCents(prices[i])}` : "Closed";
+      right = `<button class="mk-buy${mk.type === "eagle" && o === "no" ? " no" : ""}" data-trade="${mk.id}|${o}"${st.state === "open" ? "" : " disabled"}>${lbl}</button>`;
+    }
+    return `<div class="mk-row"><span class="mk-sw" style="background:${outcomeColor(mk, o)}"></span>
+      <div class="mk-o"><div class="mk-oname">${esc(outcomeName(mk, o))}</div>${sub ? `<div class="mk-octx">${esc(sub)}</div>` : ""}</div>
+      <div class="mk-pct">${pct}</div>${right}</div>`;
+  }).join("");
+  const per = st.state === "resolved" ? 1 / st.winners.length : 1;
+  const note = st.state === "locked" ? `<div class="mk-fine"><b>Betting closed</b> — the first group finished. Settles when everyone's done.</div>`
+    : st.state === "resolved" ? `<div class="mk-fine"><b>Settled: ${st.winners.map((o) => esc(outcomeName(mk, o))).join(" & ")}.</b> Winning shares paid ${per === 1 ? `${COIN}1` : `${COIN}${per.toFixed(2)}`} each.</div>` : "";
+  return `<div class="mk-card">
+    <div class="mk-title">${esc(mk.title)}</div>
+    <div class="mk-meta">${pill}<span>${fmtB(vol)} traded</span><span>· ${nBettors} bettor${nBettors === 1 ? "" : "s"}</span></div>
+    ${chartHtml(mk, ctx)}${rows}${note}
+    <div class="mk-fine">${esc(mk.desc)}</div>
+  </div>`;
+}
+
+// odds-over-time chart: one line per outcome (binary markets plot YES only), direct labels at the right
+function chartHtml(mk, ctx) {
+  const { hist, meta } = priceHistory(mk, ctx.trades), outs = mktOutcomes(mk);
+  const series = mk.type === "eagle" ? [0] : outs.map((_, i) => i);
+  chartStore[mk.id] = { mk, hist, meta, series, outs };
+  const n = hist.length, W = 300, H = 100;
+  const pts = (i) => (n === 1 ? [[0, hist[0][i]], [W, hist[0][i]]] : hist.map((v, k) => [(k / (n - 1)) * W, v[i]]))
+    .map(([x, p]) => `${x.toFixed(1)},${(H - p * H).toFixed(1)}`).join(" ");
+  const grid = [25, 50, 75].map((y) => `<line x1="0" x2="${W}" y1="${y}" y2="${y}"/>`).join("");
+  const lines = series.map((i) => `<polyline points="${pts(i)}" stroke="${outcomeColor(mk, outs[i])}"/>`).join("");
+  return `<div class="mk-chart">
+      <div class="mk-plot" data-mid="${mk.id}">
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><g class="mk-grid">${grid}</g>${lines}</svg>
+        <div class="mk-xhair"></div>
+      </div>
+      <div class="mk-labels" id="labs-${mk.id}">${labelsHtml(mk.id, n - 1)}</div>
+    </div>
+    <div class="mk-cap" id="cap-${mk.id}">${esc(captionFor(mk.id, n - 1))}</div>`;
+}
+function labelsHtml(mid, k) {
+  const { mk, hist, series, outs } = chartStore[mid], v = hist[k];
+  const ys = spreadLabels(series.map((i) => (1 - v[i]) * 100), 16);
+  return series.map((i, j) => `<div class="mk-lab" style="top:${ys[j].toFixed(1)}%"><i style="background:${outcomeColor(mk, outs[i])}"></i>${esc(outcomeShort(mk, outs[i]))}<b>${fmtPct(v[i])}</b></div>`).join("");
+}
+// nudge direct labels apart so near-equal odds don't overprint
+function spreadLabels(ys, gap) {
+  const order = ys.map((_, i) => i).sort((a, b) => ys[a] - ys[b]), out = ys.slice();
+  for (let k = 1; k < order.length; k++) out[order[k]] = Math.max(out[order[k]], out[order[k - 1]] + gap);
+  const over = out[order[order.length - 1]] - 100;
+  if (over > 0) for (const i of order) out[i] -= over;
+  for (let k = order.length - 2; k >= 0; k--) out[order[k]] = Math.min(out[order[k]], out[order[k + 1]] - gap);
+  return out;
+}
+function captionFor(mid, k) {
+  const { mk, meta, hist } = chartStore[mid], t = meta[k];
+  if (!t) return hist.length === 1 ? "No bets yet — odds start even. Be the first." : "Market opened at even odds";
+  const verb = t.sh > 0 ? `bet ${fmtB(t.c)} on` : `cashed out ${fmtB(-t.c)} of`;
+  return `${k === hist.length - 1 ? "Latest: " : ""}${firstName(bettorName(t.who))} ${verb} ${outcomeShort(mk, t.o)} · ${timeAgo(t.ts)}`;
+}
+// drag across the chart to see the odds after any bet
+function bindScrub(plot) {
+  const mid = plot.dataset.mid;
+  const show = (k) => {
+    const cd = chartStore[mid], last = cd.hist.length - 1, xh = plot.querySelector(".mk-xhair");
+    xh.style.display = k === null ? "none" : "block";
+    if (k !== null) xh.style.left = `${(k / last) * 100}%`;
+    $(`labs-${mid}`).innerHTML = labelsHtml(mid, k ?? last);
+    $(`cap-${mid}`).textContent = captionFor(mid, k ?? last);
+  };
+  const move = (e) => {
+    const n = chartStore[mid]?.hist.length || 0;
+    if (n < 2) return;
+    const r = plot.getBoundingClientRect();
+    show(Math.round(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * (n - 1)));
+  };
+  plot.addEventListener("pointermove", move);
+  plot.addEventListener("pointerdown", move);
+  plot.addEventListener("pointerleave", () => show(null));
+  plot.addEventListener("pointercancel", () => show(null));
+  plot.addEventListener("pointerup", (e) => { if (e.pointerType !== "mouse") show(null); });
+}
+function standingsHtml(ctx, me) {
+  const rows = allBettors().map((w) => ({ w, ...walletOf(w, ctx) })).sort((a, b) => b.net - a.net);
+  const active = new Set(ctx.trades.map((t) => t.who));
+  return `<div class="mk-section-title">💰 Bettor standings</div><div class="mk-card mk-standings">${rows.map((r) => {
+    const pl = r.net - MARKET.bankroll, rank = 1 + rows.filter((x) => Math.round(x.net) > Math.round(r.net)).length;
+    return `<div class="mk-st-row${r.w === me ? " me" : ""}">
+      <span class="mk-rank">${rank}</span><span class="mk-dot" style="background:${TEAMS[bettorTeam(r.w)].color}"></span>
+      <span class="mk-st-name">${esc(bettorName(r.w))}${active.has(r.w) ? "" : ` <span class="sm">· no bets</span>`}</span>
+      <span class="mk-st-net">${fmtB(r.net)}</span>
+      <span class="mk-st-pl ${pl >= 0.5 ? "up" : pl <= -0.5 ? "down" : ""}">${Math.abs(pl) < 0.5 ? "—" : signed(pl)}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+function activityHtml(ctx) {
+  const recent = ctx.trades.slice(-15).reverse();
+  if (!recent.length) return "";
+  return `<div class="mk-section-title">📈 Recent bets</div><div class="mk-card">${recent.map((t) => {
+    const mk = MKT_BY_ID[t.m];
+    return `<div class="mk-act"><span class="mk-dot" style="background:${TEAMS[bettorTeam(t.who)]?.color}"></span>
+      <b>${esc(firstName(bettorName(t.who)))}</b> ${t.sh > 0 ? `bet <b>${fmtB(t.c)}</b> on` : `cashed out <b>${fmtB(-t.c)}</b> of`}
+      <b>${esc(outcomeName(mk, t.o))}</b> · ${esc(mk.short)} <span class="mk-move">${fmtPct(t.pb)} → ${fmtPct(t.pa)}</span><span class="when">${timeAgo(t.ts)}</span></div>`;
+  }).join("")}</div>`;
+}
+function howItWorksHtml() {
+  return `<details class="mk-card mk-howto"${howOpen ? " open" : ""}><summary>How the betting works</summary>
+    <p>Every share pays <b>${COIN}1</b> if its outcome wins and nothing if it loses — so a price is the crowd's odds. A team at 34¢ has a 34% chance according to everyone's money.</p>
+    <p>Buying pushes that price up and selling pushes it down: the more people pile onto a team, the more it costs to join them. Cash out anytime before betting closes.</p>
+    <p>Everyone starts with <b>${fmtB(MARKET.bankroll)}</b> ${esc(MARKET.currency)} — play money only. Markets settle automatically from the posted scores. Richest bettor at the end gets bragging rights.</p>
+  </details>`;
+}
+
+// ── trade ticket ──
+let tradeCtx = null, tradeBusy = false;
+function openTrade(m, o, side = "buy") {
+  const mk = MKT_BY_ID[m];
+  if (!mk) return;
+  if (!myBettor()) { switchTab("market"); toast(myTeam ? "Pick who's betting first 👆" : "Log in with your team to bet"); return; }
+  tradeCtx = { m, o, side };
+  $("modal-root").innerHTML = `
+    <div class="modal-back" id="mb"><div class="modal">
+      <h3>${esc(outcomeName(mk, o))}</h3>
+      <div class="sub">${esc(mk.short)} · <span id="tq-now"></span></div>
+      <div class="seg" id="tq-seg"><button data-side="buy">Buy</button><button data-side="sell">Sell</button></div>
+      <div class="pick-label" id="tq-label"></div>
+      <input id="tq-amt" class="mk-amt" type="number" inputmode="decimal" min="0" placeholder="0" autocomplete="off">
+      <div class="chips" id="tq-chips"></div>
+      <div class="mk-quote" id="tq-quote"></div>
+      <div class="modal-actions"><button class="btn ghost" id="cancel">Cancel</button><button class="btn" id="tq-go">Place bet</button></div>
+    </div></div>`;
+  $("cancel").onclick = closeModal;
+  $("mb").onclick = (e) => { if (e.target.id === "mb") closeModal(); };
+  $("tq-seg").onclick = (e) => {
+    const b = e.target.closest("button[data-side]");
+    if (b && !b.disabled) { tradeCtx.side = b.dataset.side; $("tq-amt").value = ""; updateQuote(true); }
+  };
+  $("tq-amt").oninput = () => updateQuote();
+  $("tq-chips").onclick = (e) => { const c = e.target.closest("[data-amt]"); if (c) { $("tq-amt").value = c.dataset.amt; updateQuote(); } };
+  $("tq-go").onclick = placeTrade;
+  updateQuote(true);
+}
+function ticketAmount(held) {
+  const raw = parseFloat($("tq-amt").value) || 0;
+  return tradeCtx.side === "sell" && Math.abs(raw - held) < 1e-3 ? held : raw;
+}
+// live quote — re-runs on every keystroke and whenever anyone else trades
+function updateQuote(rebuildChips) {
+  if (!tradeCtx || !$("tq-quote")) return;
+  const me = myBettor();
+  if (!me) return closeModal();
+  const { m, o } = tradeCtx, mk = MKT_BY_ID[m], i = mktOutcomes(mk).indexOf(o);
+  const ctx = marketContext(), st = ctx.statuses[m], q = ctx.qs[m], p = ctx.prices[m][i];
+  const w = walletOf(me, ctx), held = w.hold[`${m}|${o}`] || 0;
+  if (tradeCtx.side === "sell" && held < 1e-4) { tradeCtx.side = "buy"; rebuildChips = true; }
+  const buy = tradeCtx.side === "buy";
+  $("tq-now").textContent = `${fmtPct(p)} chance · pays ${COIN}1/share ${winsPhrase(mk, o)}`;
+  for (const b of $("tq-seg").children) {
+    b.classList.toggle("on", b.dataset.side === tradeCtx.side);
+    if (b.dataset.side === "sell") b.disabled = held < 1e-4;
+  }
+  $("tq-label").textContent = buy ? `Bet amount · cash ${fmtB(w.cash)}` : `Shares to sell · you hold ${fmtSh(held)}`;
+  if (rebuildChips) {
+    const opts = buy
+      ? [10, 25, 50, 100, 250].filter((v) => v <= w.cash).map((v) => [v, fmtB(v)]).concat(w.cash >= 1 ? [[Math.floor(w.cash), "Max"]] : [])
+      : [[held * 0.25, "25%"], [held * 0.5, "50%"], [held, "All"]];
+    $("tq-chips").innerHTML = opts.map(([v, l]) => `<button class="chip" data-amt="${+v.toFixed(4)}">${l}</button>`).join("");
+  }
+  const amt = ticketAmount(held);
+  const row = (k, v, cls = "") => `<div class="qr ${cls}"><span>${k}</span><b>${v}</b></div>`;
+  let html = "", label, ok = st.state === "open" && amt > 0;
+  if (st.state !== "open") { html = row("Betting is closed on this market", ""); label = "Betting closed"; ok = false; }
+  else if (buy) {
+    const sh = amt > 0 ? lmsrSharesFor(q, mk.b, i, amt) : 0, pa = lmsrAfter(q, mk.b, i, sh);
+    if (amt > w.cash + 1e-6) { ok = false; html += row("Not enough cash", fmtB(w.cash), "bad"); }
+    html += row("Shares", amt > 0 ? fmtSh(sh) : "—") + row("Avg price", amt > 0 ? fmtCents(amt / sh) : "—")
+      + row("Odds after your bet", amt > 0 ? `${fmtPct(p)} → ${fmtPct(pa)}` : fmtPct(p))
+      + row(`Payout ${winsPhrase(mk, o)}`, amt > 0 ? `${fmtB(sh)} (${signed(sh - amt)})` : "—", "big");
+    label = amt > 0 ? `Bet ${fmtB(amt)} on ${outcomeShort(mk, o)}` : "Enter an amount";
+  } else {
+    const n = Math.min(amt, held), got = n > 0 ? lmsrProceeds(q, mk.b, i, n) : 0, pa = lmsrAfter(q, mk.b, i, -n);
+    const basis = (w.positions.find((x) => x.m === m && x.o === o)?.cost || 0) * (held > 0 ? n / held : 0);
+    if (amt > held + 1e-6) { ok = false; html += row("You only hold", fmtSh(held), "bad"); }
+    html += row("You receive", n > 0 ? fmtB(got) : "—", "big") + row("Profit on these shares", n > 0 ? signed(got - basis) : "—")
+      + row("Odds after", n > 0 ? `${fmtPct(p)} → ${fmtPct(pa)}` : fmtPct(p));
+    label = n > 0 ? `Sell ${fmtSh(n)} shares for ${fmtB(got)}` : "Enter shares to sell";
+  }
+  $("tq-quote").innerHTML = html;
+  $("tq-go").textContent = tradeBusy ? "Placing…" : label;
+  $("tq-go").disabled = !ok || tradeBusy;
+}
+// Runs as a database transaction so simultaneous bets are priced one after another and
+// nobody can overspend; aborts if the odds moved >3% against you since the quote.
+async function placeTrade() {
+  if (!tradeCtx || tradeBusy) return;
+  const who = myBettor();
+  if (!who) return;
+  const { m, o, side } = tradeCtx, mk = MKT_BY_ID[m], i = mktOutcomes(mk).indexOf(o);
+  const ctx0 = marketContext(), held0 = walletOf(who, ctx0).hold[`${m}|${o}`] || 0;
+  const amt = ticketAmount(held0);
+  if (amt <= 0) return;
+  const quoted = side === "buy" ? lmsrSharesFor(ctx0.qs[m], mk.b, i, amt) : lmsrProceeds(ctx0.qs[m], mk.b, i, Math.min(amt, held0));
+  const key = sync.newKey();
+  ack(`trade-${key}`); // no "someone bet" toast for our own trade
+  let fail = null, fill = null;
+  tradeBusy = true;
+  updateQuote();
+  const committed = await sync.transact("market", (cur) => {
+    fail = null; fill = null;
+    const c = marketContext(tradeList(cur));
+    if (c.statuses[m].state !== "open") { fail = "Betting on this market just closed."; return; }
+    const q = c.qs[m], w = walletOf(who, c), pb = lmsrPrices(q, mk.b)[i];
+    let sh, cost;
+    if (side === "buy") {
+      if (amt > w.cash + 1e-6) { fail = `Not enough ${MARKET.currency} — you have ${fmtB(w.cash)}.`; return; }
+      sh = lmsrSharesFor(q, mk.b, i, amt);
+      cost = amt;
+      if (sh < quoted * 0.97) { fail = "The odds moved while you were deciding — check the new price."; return; }
+    } else {
+      const held = w.hold[`${m}|${o}`] || 0, n = Math.abs(amt - held) < 1e-3 ? held : amt;
+      if (n > held + 1e-6) { fail = "You don't hold that many shares anymore."; return; }
+      const got = lmsrProceeds(q, mk.b, i, n);
+      if (got < quoted * 0.97) { fail = "The odds moved while you were deciding — check the new price."; return; }
+      sh = -n;
+      cost = -got;
+    }
+    fill = { sh, cost, pa: lmsrAfter(q, mk.b, i, sh) };
+    const trade = { m, o, who, sh: +sh.toFixed(6), c: +cost.toFixed(6), pb: +pb.toFixed(4), pa: +fill.pa.toFixed(4), ts: Date.now() };
+    return { ...(cur || {}), trades: { ...(cur?.trades || {}), [key]: trade } };
+  }).catch((e) => { console.error(e); fail = "Couldn't reach the market — check your signal and try again."; return false; });
+  tradeBusy = false;
+  if (committed && fill) {
+    closeModal();
+    toast(fill.sh > 0
+      ? `✅ ${fmtSh(fill.sh)} shares of ${outcomeShort(mk, o)} @ ${fmtCents(fill.cost / fill.sh)} · odds now ${fmtPct(fill.pa)}`
+      : `✅ Sold ${fmtSh(-fill.sh)} shares for ${fmtB(-fill.cost)} · odds now ${fmtPct(fill.pa)}`);
+  } else {
+    if (fail) toast(fail);
+    updateQuote(true);
+  }
+}
+document.addEventListener("click", (e) => {
+  const tr = e.target.closest("[data-trade]");
+  if (tr) { const [m, o, side] = tr.dataset.trade.split("|"); openTrade(m, o, side || "buy"); return; }
+  const pick = e.target.closest("[data-bettor]");
+  if (pick && myTeam) {
+    bettor = { team: myTeam, name: pick.dataset.bettor };
+    localStorage.setItem("bslbend-bettor", JSON.stringify(bettor));
+    toast(`Betting as ${pick.dataset.bettor} · ${fmtB(MARKET.bankroll)} to play with 🍀`);
+    renderMarket();
+    return;
+  }
+  if (e.target.closest("[data-switch-bettor]")) { bettor = null; localStorage.removeItem("bslbend-bettor"); renderMarket(); return; }
+  if (e.target.closest(".mk-howto summary")) howOpen = !howOpen;
+});
+
 // ───────────────────────── notifications (cross-device banners) ─────────────────────────
 const FRESH_MS = 20 * 60 * 1000;
 let suppressNotify = false; // true while writing our own event, so the local echo doesn't double-banner
@@ -802,6 +1290,30 @@ function checkNotifications() {
       banner("b-drinks", "🍺", `<b>INCOMING: ${esc(TEAMS[dr.from].name)} sent you ${dr.count} drinks!</b><br>They doubled hole ${dr.hole} and chose violence. Drink up.`);
     } else if (dr.from === myTeam) {
       banner("b-info", "🍻", `Your team sent ${dr.count} drinks to ${esc(TEAMS[dr.to].name)} (hole ${dr.hole}).`);
+    }
+  }
+  const mctx = marketContext(), me = myBettor();
+  let bigBet = null;
+  for (const t of mctx.trades) {
+    if (!t.ts || now - t.ts > 3 * 60 * 1000 || acked.has(`trade-${t.id}`)) continue;
+    ack(`trade-${t.id}`);
+    if (t.who !== me && Math.abs(t.c) >= 100) bigBet = t; // only the newest, so opening the app mid-round isn't a toast storm
+  }
+  if (bigBet) {
+    const mk = MKT_BY_ID[bigBet.m];
+    toast(`📈 ${firstName(bettorName(bigBet.who))} ${bigBet.sh > 0 ? `put ${fmtB(bigBet.c)} on` : "cashed out of"} ${outcomeShort(mk, bigBet.o)} (${mk.short}) · now ${fmtPct(bigBet.pa)}`);
+  }
+  if (me) {
+    for (const mk of MARKET.markets) {
+      const st = mctx.statuses[mk.id];
+      if (st.state !== "resolved" || !st.ts || now - st.ts > FRESH_MS) continue;
+      const key = `settle-${mk.id}-${st.winners.join(",")}-${me}`;
+      if (acked.has(key)) continue;
+      ack(key);
+      const mine = walletOf(me, mctx).positions.filter((p) => p.m === mk.id);
+      if (!mine.length) continue;
+      const won = mine.reduce((s, p) => s + (p.paid || 0), 0);
+      banner("b-info", won > 0 ? "💰" : "💸", `<b>${esc(mk.short)} settled: ${st.winners.map((o) => esc(outcomeName(mk, o))).join(" & ")}</b><br>${won > 0 ? `You collected ${fmtB(won)}.` : "Your shares expired worthless. Better luck next market."}`);
     }
   }
 }

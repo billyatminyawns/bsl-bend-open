@@ -34,6 +34,8 @@ const COURSE = {
 
 const TEE_LABEL = { R: "▲ Rust", G: "▼ Gold" };
 
+// Team colors double as odds-chart lines, so they're tuned to stay distinguishable
+// (incl. red/green colorblindness) when the lines cross.
 const TEAMS = {
   billy: {
     id: "billy",
@@ -45,21 +47,21 @@ const TEAMS = {
   jordan: {
     id: "jordan",
     name: "Team Jordan",
-    color: "#16a34a",
+    color: "#059669",
     pw: "jordan",
     players: ["Jordan", "Benjamin Morgan", "Leo Chen", "Adam Jacobson"],
   },
   zach: {
     id: "zach",
     name: "Team Zach",
-    color: "#d97706",
+    color: "#eaa00c",
     pw: "zach",
     players: ["Zach", "Robby Gross", "Albert Byun", "Danny K"],
   },
   stephen: {
     id: "stephen",
     name: "Team Stephen",
-    color: "#dc2626",
+    color: "#b91c1c",
     pw: "stephen",
     players: ["Stephen", "Bryce Dacus", "George Tang", "Nick Campbell"],
   },
@@ -72,4 +74,43 @@ const RULES = {
   drivesRequired: 2,     // per player; a par-3 tee shot may count as a drive OR a 2nd shot (one, not both)
   secondsRequired: 2,    // per player; par 3s count (tee shot, if not used as a drive)
   puttsRequired: 2,      // first putts per player, ball must be on the green
+};
+
+// ── Side-action prediction market ──
+// Play money only: everyone starts with the same Bend Bucks bankroll and nothing is
+// paid out of the app. Prices come from an LMSR market maker; `b` is liquidity —
+// higher = odds move less per bet.
+const MARKET = {
+  currency: "Bend Bucks",
+  symbol: "🪙",
+  bankroll: 1000,
+  markets: [
+    {
+      id: "winner",
+      type: "team",
+      title: "Who wins the 11th BSL Bend Open?",
+      short: "Tournament winner",
+      holes: [1, 18],
+      b: 800,
+      desc: "Lowest 18-hole team total. Betting closes when the first group finishes 18. Ties go to matching cards (back 9, last 6, last 3, 18th), then split.",
+    },
+    {
+      id: "front9",
+      type: "team",
+      title: "Who wins the front 9?",
+      short: "Front 9",
+      holes: [1, 9],
+      b: 600,
+      desc: "Lowest team score on holes 1–9. Betting closes when the first group finishes the front. Ties: last 6, last 3, 9th hole, then split.",
+    },
+    {
+      id: "eagle",
+      type: "eagle",
+      title: "Will anyone card an eagle (or better)?",
+      short: "Eagle watch",
+      holes: [1, 18],
+      b: 500,
+      desc: "Settles YES the moment any team posts an eagle or better, NO if nobody has by the end. Closes when the first group finishes 18.",
+    },
+  ],
 };
