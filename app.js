@@ -32,10 +32,13 @@ class FirebaseAdapter {
   constructor(cfg, root = "") {
     firebase.initializeApp(cfg);
     this.db = firebase.database();
+    // Photo/video bytes ride a second connection. One connection delivers strictly in order, so a
+    // 50 MB video on the shared one held every score, bet and reaction behind it until it finished.
+    this.mediaDb = firebase.initializeApp(cfg, "media").database();
     this.live = true;
     this.root = root;
   }
-  _ref(path) { return this.db.ref(this.root + path); }
+  _ref(path) { return (path.startsWith("mediaData") ? this.mediaDb : this.db).ref(this.root + path); }
   on(path, cb) { this._ref(path).on("value", (s) => cb(s.val())); }
   set(path, val) { return this._ref(path).set(val); }
   push(path, val) { const r = this._ref(path).push(); r.set(val); return r.key; }
@@ -81,6 +84,7 @@ class LocalAdapter {
 
 // ───────────────────────── state ─────────────────────────
 let sync;
+let online = false; // live link to the database; bets need one (see placeBet)
 let myTeam = null; // team id or null (spectator)
 const state = { scores: {}, drinks: {}, mediaMeta: {}, reactions: {}, comments: {}, market: {} };
 // ?sandbox=<name> points the whole app at an isolated practice copy of the database.
@@ -90,7 +94,7 @@ const DEVICE_ID = (() => {
   if (!d) { d = uid(); localStorage.setItem("bslbend-device", d); }
   return d;
 })();
-const mediaCache = {}; // id -> data url
+const mediaCache = {}; // id -> photo data URL or video Blob (see cacheMedia)
 let currentTab = "score";
 
 const ACK_KEY = "bslbend-acked";
@@ -108,7 +112,7 @@ function boot() {
   const dot = $("sync-dot");
   if (sync.live) {
     const liveLabel = SANDBOX ? "SANDBOX" : "LIVE";
-    sync.onConnection((ok) => { dot.className = ok ? "live" : ""; $("sync-label").textContent = ok ? liveLabel : "offline"; dot.id = "sync-dot"; });
+    sync.onConnection((ok) => { online = ok; dot.className = ok ? "live" : ""; $("sync-label").textContent = ok ? liveLabel : "offline"; dot.id = "sync-dot"; updateBetQuote(); });
     dot.classList.add("live"); $("sync-label").textContent = liveLabel;
     if (SANDBOX) {
       $("demo-note").innerHTML = `🧪 <b>Sandbox “${esc(SANDBOX)}”</b> — a practice copy. Scores and bets here never touch the real event.`;
@@ -342,7 +346,12 @@ function openScoreModal(h) {
     maybePromptContest(h);
   };
 }
-function closeModal() { $("modal-root").innerHTML = ""; betCtx = null; }
+let videoUrl = null; // Blob URL of the video in the open viewer, released on close
+function closeModal() {
+  $("modal-root").innerHTML = "";
+  betCtx = null;
+  if (videoUrl) { URL.revokeObjectURL(videoUrl); videoUrl = null; }
+}
 
 function celebrate(kind, h) {
   if (kind === "eagle") banner("b-eagle", "🦅", `<b>EAGLE on ${h}!</b><br>EVERYONE shotguns / takes a shot. All 16. No exceptions.`);
@@ -457,12 +466,12 @@ async function handleFile(e, type) {
       }
       await sync.set(`mediaData/${id}/n`, n);
     } else {
-      sync.set(`mediaData/${id}`, { data });
+      await sync.set(`mediaData/${id}`, { data }); // the bytes and the meta travel on different connections
     }
     sync.set(`mediaMeta/${id}`, {
       team: myTeam, hole: ctx.hole, type, event: ctx.event, thumb: thumb || null, ts: Date.now(), size: file.size,
     });
-    mediaCache[id] = data;
+    cacheMedia(id, type === "video" ? file : data);
     toast(type === "photo" ? "📸 Photo posted!" : "🎥 Video posted!");
     switchTab("media");
   } catch (err) {
@@ -539,18 +548,31 @@ async function openMediaView(id, m) {
     </div>`;
   $("cancel").onclick = closeModal;
   $("mb").onclick = (e) => { if (e.target.id === "mb") closeModal(); };
+  const slot = $("media-slot");
   let data = mediaCache[id];
   if (!data) {
     const rec = await sync.get(`mediaData/${id}`);
     if (rec && rec.data) data = rec.data;
     else if (rec && rec.n) data = Array.from({ length: rec.n }, (_, i) => rec[`c${String(i).padStart(3, "0")}`] || "").join("");
-    if (data) mediaCache[id] = data;
+    if (data && m.type === "video") data = await fetch(data).then((r) => r.blob()).catch(() => null); // a Blob, not a 67 MB data: string
+    if (data) cacheMedia(id, data);
   }
-  const slot = $("media-slot");
-  if (!slot) return;
+  if (!slot.isConnected) return; // closed (or replaced by another viewer) while loading
   if (!data) { slot.textContent = "Couldn't load media."; return; }
   slot.style.padding = "0";
-  slot.innerHTML = m.type === "video" ? `<video src="${data}" controls playsinline autoplay></video>` : `<img src="${data}" alt="">`;
+  if (m.type === "video") {
+    videoUrl = URL.createObjectURL(data);
+    slot.innerHTML = `<video src="${videoUrl}" controls playsinline autoplay></video>`;
+  } else slot.innerHTML = `<img src="${data}" alt="">`;
+}
+// Photos are small, so their data URLs stay cached. Videos are kept as Blobs, and only the last
+// few, so a phone that watches every clip of the day doesn't run out of memory.
+const recentVideos = [];
+function cacheMedia(id, v) {
+  mediaCache[id] = v;
+  if (!(v instanceof Blob)) return;
+  recentVideos.push(id);
+  while (recentVideos.length > 3) delete mediaCache[recentVideos.shift()];
 }
 
 // ───────────────────────── requirements ─────────────────────────
@@ -1219,6 +1241,7 @@ function updateBetQuote(rebuildChips) {
   const row = (k, v, cls = "") => `<div class="qr ${cls}"><span>${k}</span><b>${v}</b></div>`;
   let html = "", label = "Enter an amount", ok = st.state === "open" && valid;
   if (st.state !== "open") { html = row("Betting is closed on this market", ""); label = "Betting closed"; ok = false; }
+  else if (sync.live && !online) { html = row("No signal — betting needs a live connection", "", "bad"); label = "Offline"; ok = false; }
   else if (raw !== "" && !valid) { html = row("Whole Bend Bucks only", "", "bad"); ok = false; }
   else {
     const a = valid ? amt * 100 : 0, potAfter = pot.total + a, onAfter = on + a;
@@ -1238,6 +1261,9 @@ async function placeBet() {
   if (!betCtx || betBusy) return;
   const who = myBettor(), { m, o } = betCtx, mk = MKT_BY_ID[m], amt = Number($("bq-amt").value);
   if (!who || !Number.isInteger(amt) || amt < 1) return;
+  // Offline, this phone may still show a market open that closed elsewhere, and a queued bet would
+  // land when signal returns — possibly long after the turn. Only bet on live data.
+  if (sync.live && !online) return toast("📶 No signal — bets need a live connection. Try again in a moment.");
   const key = sync.newKey();
   ack(`bet-${key}`); // no "someone bet" toast for our own bet
   let fail = null, done = null;
