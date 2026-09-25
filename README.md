@@ -14,12 +14,13 @@ Live team scramble tracker for the 11th BSL Bend Open at Pronghorn Club (Nicklau
   - 🦅 Eagle → everyone shotguns / takes a shot (broadcast to all phones)
   - 🐦 Birdie → 3 of 4 players finish their drink + upload proof
   - 💀 Double bogey → send 3–4 drinks to a team of your choice (their phones get the alert)
-- 📈 **Market tab** — Polymarket-style prediction market (play money, no real money in the app):
-  - Every player gets 🪙1,000 Bend Bucks and bets on **Tournament winner**, **Front 9 winner**, and **Eagle watch** (yes/no)
-  - Each share pays 🪙1 if its outcome wins, so prices = the crowd's odds; an LMSR market maker moves the price with every buy/sell
-  - Live odds chart (drag to scrub), cash out anytime before betting closes, bettor standings, big bets in the feed
-  - Betting closes when the first group finishes the market's holes; markets settle automatically from posted scores (ties → matching cards, then split)
-  - Bets run as Firebase transactions, so simultaneous bets are priced in order and nobody can overspend
+- 📈 **Market tab** — zero-sum side-bet pools (play money, no house):
+  - Every player gets 🪙10 Bend Bucks for four pools: **18-hole winner**, **Long drive** and **Closest to the pin** (all 16 players eligible), and **Eagle watch** (yes/no)
+  - Pari-mutuel: each pool's pot is split among whoever backed the winner, pro rata to stakes — every Bend Buck won is one someone else lost
+  - Odds = each pick's share of the pot and move with every bet; bets are final
+  - 18-hole winner and Eagle watch close at the turn; contests close when the first group reaches the hole (Team Billy can change contest holes in the app)
+  - Groups record their best long drive / closest shot after the hole; pools settle automatically (ties split the pot; no winning bets → refunds)
+  - Bets run as Firebase transactions, so simultaneous bets can't overspend a wallet
 
 ## Local dev
 ```

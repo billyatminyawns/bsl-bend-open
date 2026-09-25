@@ -542,10 +542,6 @@ main { max-width: 640px; margin: 0 auto; padding: 14px 12px 20px; }
 .mk-howto summary { cursor: pointer; font-weight: 700; font-size: 13px; }
 .mk-howto p { margin-top: 8px; }
 
-.seg { display: flex; background: var(--cream-2); border-radius: 10px; padding: 3px; margin-bottom: 4px; }
-.seg button { flex: 1; border: none; background: none; border-radius: 8px; padding: 9px; font-weight: 700; font-size: 14px; font-family: -apple-system, sans-serif; color: var(--ink-soft); }
-.seg button.on { background: var(--card); color: var(--ink); box-shadow: var(--shadow); }
-.seg button:disabled { opacity: 0.35; }
 .mk-amt {
   width: 100%;
   font-size: 26px;
@@ -564,5 +560,17 @@ main { max-width: 640px; margin: 0 auto; padding: 14px 12px 20px; }
 .mk-quote .qr span { color: var(--ink-soft); }
 .mk-quote .qr.big b { color: var(--green); font-size: 15px; }
 .mk-quote .qr.bad span, .mk-quote .qr.bad b { color: var(--birdie); }
-#tq-go { flex: 2.2; font-size: 14px; padding-left: 10px; padding-right: 10px; }
+#bq-go, #ce-save { flex: 2.2; font-size: 14px; padding-left: 10px; padding-right: 10px; }
 .feed-item.f-market { border-left-color: var(--green); }
+
+.mk-bar { height: 5px; background: var(--cream-2); border-radius: 3px; margin: 4px 0 2px; overflow: hidden; }
+.mk-bar i { display: block; height: 100%; border-radius: 3px; }
+.mk-contest { background: var(--cream-2); border-radius: 10px; padding: 9px 11px; margin: 12px 0 6px; font-family: -apple-system, sans-serif; }
+.mk-lead { font-size: 13px; }
+.mk-entries { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 6px; font-size: 11.5px; color: var(--ink); }
+.mk-entry { display: inline-flex; align-items: center; gap: 5px; }
+.mk-entry i { width: 7px; height: 7px; border-radius: 50%; }
+.mk-entry.wait { color: var(--ink-soft); }
+.mk-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.mk-zero { font-size: 11px; color: var(--ink-soft); font-family: -apple-system, sans-serif; line-height: 1.45; border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.mk-zero b { color: var(--ink); }

@@ -76,41 +76,58 @@ const RULES = {
   puttsRequired: 2,      // first putts per player, ball must be on the green
 };
 
-// ── Side-action prediction market ──
-// Play money only: everyone starts with the same Bend Bucks bankroll and nothing is
-// paid out of the app. Prices come from an LMSR market maker; `b` is liquidity —
-// higher = odds move less per bet.
+// ── Side-bet pools ──
+// Play money, pari-mutuel: every bet on a market goes into one pot, and the pot is split
+// among whoever backed the winner in proportion to their stakes. No house — every Bend Buck
+// won is one someone else lost. Contest holes are defaults; the organizer team can change
+// them in the app.
 const MARKET = {
   currency: "Bend Bucks",
   symbol: "🪙",
-  bankroll: 1000,
+  bankroll: 10, // per player, whole bucks
+  organizer: "billy",
   markets: [
     {
       id: "winner",
       type: "team",
+      icon: "🏆",
       title: "Who wins the 11th BSL Bend Open?",
-      short: "Tournament winner",
-      holes: [1, 18],
-      b: 800,
-      desc: "Lowest 18-hole team total. Betting closes when the first group finishes 18. Ties go to matching cards (back 9, last 6, last 3, 18th), then split.",
+      short: "18-hole winner",
+      closesAfterHoles: 9,
+      desc: "Lowest 18-hole team total. Betting closes at the turn (once any group has played 9). Ties go to matching cards (back 9, last 6, last 3, 18th), then the pot is split.",
     },
     {
-      id: "front9",
-      type: "team",
-      title: "Who wins the front 9?",
-      short: "Front 9",
-      holes: [1, 9],
-      b: 600,
-      desc: "Lowest team score on holes 1–9. Betting closes when the first group finishes the front. Ties: last 6, last 3, 9th hole, then split.",
+      id: "longdrive",
+      type: "contest",
+      best: "max",
+      unit: "yds",
+      icon: "💣",
+      title: "Who wins long drive?",
+      short: "Long drive",
+      hole: 16,
+      noneLabel: "Nobody in the fairway",
+      desc: "All 16 players. Each group records its longest drive in the fairway; longest wins, ties split. Betting closes when the first group reaches the hole.",
+    },
+    {
+      id: "ctp",
+      type: "contest",
+      best: "min",
+      unit: "ft",
+      icon: "🎯",
+      title: "Who wins closest to the pin?",
+      short: "Closest to the pin",
+      hole: 14,
+      noneLabel: "Nobody on the green",
+      desc: "All 16 players. Each group records its closest tee shot on the green; closest wins, ties split. Betting closes when the first group reaches the hole.",
     },
     {
       id: "eagle",
-      type: "eagle",
+      type: "yesno",
+      icon: "🦅",
       title: "Will anyone card an eagle (or better)?",
       short: "Eagle watch",
-      holes: [1, 18],
-      b: 500,
-      desc: "Settles YES the moment any team posts an eagle or better, NO if nobody has by the end. Closes when the first group finishes 18.",
+      closesAfterHoles: 9,
+      desc: "Settles YES the moment any team posts an eagle or better, NO if nobody has after 18. Betting closes at the turn.",
     },
   ],
 };
