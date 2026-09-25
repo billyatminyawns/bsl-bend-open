@@ -980,7 +980,7 @@ function walletHtml(ctx, me) {
     <div class="mk-nums">
       <div><div class="k">Cash</div><div class="v">${fmtB(w.cash)}</div></div>
       <div><div class="k">In bets</div><div class="v">${fmtB(w.value)}</div></div>
-      <div><div class="k">Net worth</div><div class="v">${fmtB(w.net)}</div><small class="${pl >= 0 ? "up" : "down"}">${Math.abs(pl) < 0.5 ? "even" : signed(pl)}</small></div>
+      <div><div class="k">Net worth</div><div class="v">${fmtB(w.net)}</div><small class="${pl >= 0.5 ? "up" : pl <= -0.5 ? "down" : ""}">${Math.abs(pl) < 0.5 ? "even" : signed(pl)}</small></div>
     </div>
     ${rows ? `<div class="mk-positions">${rows}</div>` : `<div class="mk-fine">No bets yet — tap a price below to buy in.</div>`}
   </div>`;
