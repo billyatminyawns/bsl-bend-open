@@ -843,7 +843,7 @@ const mktOutcomes = (mk) => (mk.type === "team" ? TEAM_ORDER : mk.type === "yesn
 const outcomeName = (mk, o) => (mk.type === "team" ? TEAMS[o]?.name || o : mk.type === "yesno" ? (o === "yes" ? "Yes" : "No") : bettorName(o));
 const outcomeShort = (mk, o) => (mk.type === "team" ? outcomeName(mk, o).replace(/^Team /, "") : mk.type === "contest" ? firstName(bettorName(o)) : outcomeName(mk, o));
 const outcomeColor = (mk, o) => (mk.type === "team" ? TEAMS[o]?.color : mk.type === "yesno" ? (o === "yes" ? "#15803d" : "#b91c1c") : TEAMS[bettorTeam(o)]?.color) || "#999";
-const winsPhrase = (mk, o) => (mk.type === "yesno" ? (o === "yes" ? "if anyone eagles" : "if nobody eagles") : `if ${outcomeShort(mk, o)} wins`);
+const winsPhrase = (mk, o) => (mk.type === "yesno" ? (o === "yes" ? "if anyone eagles" : "if nobody eagles") : `if ${outcomeShort(mk, o)} ${mk.worst ? "finishes last" : "wins"}`);
 
 let bettor = (() => { try { return JSON.parse(localStorage.getItem("bslbend-bettor") || "null"); } catch { return null; } })();
 function myBettor() {
@@ -868,13 +868,14 @@ const contestEntries = (mk) => state.market?.results?.[mk.id] || {};
 // ── settlement (derived from posted scores + recorded contest results) ──
 function rangeComplete(tid, [from, to]) { for (let h = from; h <= to; h++) if (!state.scores[tid]?.[h]) return false; return true; }
 function rangeTotal(tid, from, to) { let t = 0; for (let h = from; h <= to; h++) t += state.scores[tid][h].s; return t; }
-// Lowest total wins; ties go to matching cards (last 9, 6, 3, 1 holes); still tied → split.
-function countbackWinners([from, to]) {
+// Lowest total wins (highest, for a "worst" pool like last place); ties go to matching cards
+// (last 9, 6, 3, 1 holes, compared the same way); still tied → split.
+function countbackWinners([from, to], worst) {
   const len = to - from + 1;
   let alive = TEAM_ORDER.slice();
   for (const w of [...new Set([len, 9, 6, 3, 1])].filter((w) => w <= len)) {
     const tot = alive.map((t) => rangeTotal(t, to - w + 1, to));
-    const best = Math.min(...tot);
+    const best = (worst ? Math.max : Math.min)(...tot);
     alive = alive.filter((_, i) => tot[i] === best);
     if (alive.length === 1) break;
   }
@@ -905,7 +906,7 @@ function marketStatus(mk) {
     if (eagleTs !== null) return { state: "resolved", winners: ["yes"], ts: eagleTs };
     if (roundOver()) return { state: "resolved", winners: ["no"], ts: lastScoreTs() };
   } else if (roundOver()) {
-    return { state: "resolved", winners: countbackWinners([1, 18]), ts: lastScoreTs() };
+    return { state: "resolved", winners: countbackWinners([1, 18], mk.worst), ts: lastScoreTs() };
   }
   return TEAM_ORDER.some((t) => holesPlayed(t) >= mk.closesAfterHoles) ? { state: "locked" } : { state: "open" };
 }
@@ -1062,7 +1063,8 @@ function rowHtml(mk, o, ctx, me, extra) {
   let right;
   if (st.state === "resolved") {
     const won = st.winners.includes(o);
-    right = `<div class="mk-won${won ? "" : " lost"}">${won ? (st.winners.length > 1 ? "🏆 SPLIT" : "🏆 WON") : "—"}</div>`;
+    const tag = mk.worst ? (st.winners.length > 1 ? "🥄 TIED LAST" : "🥄 LAST") : st.winners.length > 1 ? "🏆 SPLIT" : "🏆 WON";
+    right = `<div class="mk-won${won ? "" : " lost"}">${won ? tag : "—"}</div>`;
   } else {
     const lbl = st.state !== "open" ? "Closed" : mk.type === "yesno" ? `Bet ${outcomeName(mk, o)}` : "Bet";
     right = `<button class="mk-buy${mk.type === "yesno" && o === "no" ? " no" : ""}" data-bet-m="${mk.id}" data-bet-o="${esc(o)}"${st.state === "open" ? "" : " disabled"}>${lbl}</button>`;
