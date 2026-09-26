@@ -97,6 +97,16 @@ const MARKET = {
       desc: "Lowest 18-hole team total. Betting closes at the turn (once any group has played 9). Ties go to matching cards (back 9, last 6, last 3, 18th), then the pot is split.",
     },
     {
+      id: "last",
+      type: "team",
+      worst: true, // settles on the highest total
+      icon: "🥄",
+      title: "Who finishes last?",
+      short: "Last place",
+      closesAfterHoles: 9,
+      desc: "Highest 18-hole team total takes the wooden spoon. Betting closes at the turn (once any group has played 9). Ties go to matching cards (the worse back 9, then last 6, last 3, 18th), then the pot is split.",
+    },
+    {
       id: "longdrive",
       type: "contest",
       best: "max",
